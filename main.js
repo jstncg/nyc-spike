@@ -305,9 +305,10 @@ function stepGlide(dt) {
   const steer = (keys.has('KeyA') ? 1 : 0) - (keys.has('KeyD') ? 1 : 0);
   gPitch = clamp(gPitch + pitchIn * GLIDER.pitchRate * dt, -0.9, 0.45);
   gBank = lerp(gBank, steer * 0.7, Math.min(1, 4 * dt));
-  gYaw += steer * GLIDER.turn * dt * (keys.has('ShiftLeft') ? 1.6 : 1);
+  gYaw += steer * GLIDER.turn * dt;
   // gravity along the nose, drag toward cruise speed
   gSpeed += (-9.8 * Math.sin(gPitch) - 0.4 * (gSpeed - GLIDER.cruise)) * dt;
+  if (keys.has('ShiftLeft')) gSpeed += 30 * dt; // sprint: push toward max speed
   gSpeed = clamp(gSpeed, GLIDER.min, GLIDER.max);
   const dir = new THREE.Vector3(-Math.sin(gYaw) * Math.cos(gPitch), Math.sin(gPitch), -Math.cos(gYaw) * Math.cos(gPitch));
   const move = dir.clone().multiplyScalar(gSpeed * dt); move.y -= GLIDER.sink * dt;
@@ -384,7 +385,7 @@ renderer.setAnimationLoop(() => {
   hud.textContent = mode === 'drive'
     ? `${Math.abs(carSpeed * 3.6).toFixed(0)} km/h\nWS gas/reverse · AD steer · Space brake · V exit`
     : mode === 'glide'
-      ? `${(gSpeed * 3.6).toFixed(0)} km/h · ${glider.position.y.toFixed(0)} m\nW dive · S climb · AD turn · Shift sharp turn · H land`
+      ? `${(gSpeed * 3.6).toFixed(0)} km/h · ${glider.position.y.toFixed(0)} m\nW dive · S climb · AD turn · Shift sprint · H land`
       : `${grounded ? '' : 'air · '}WASD move · Shift run · Space jump · V car · H glider · click to look`;
   attribution.textContent = tiles.getAttributions().map(a => a.value).join(' · ');
 });
