@@ -81,9 +81,9 @@ function setOrigin(lat, lon, label = `${lat.toFixed(4)}, ${lon.toFixed(4)}`) {
 }
 
 // ---- spawn: hold above the target behind a curtain until ground tiles exist, then place feet on the ground ----
-let spawning = false;
+let spawning = false, settledFrames = 0, spawnTimer = 0;
 function beginSpawn(label) {
-  spawning = true; vy = 0; grounded = false;
+  spawning = true; settledFrames = 0; spawnTimer = 0; vy = 0; grounded = false;
   feet.set(0, 300, 0);
   $('loading').textContent = `Loading ${label}…`;
   $('loading').style.display = 'flex';
@@ -165,12 +165,14 @@ Promise.all([load('/guy.glb'), load('/Soldier.glb')]).then(([m, s]) => {
   const skinned = root => { let r; root.traverse(o => { if (!r && o.isSkinnedMesh) r = o; }); return r; };
   const target = skinned(m.scene);
   m.scene.traverse(o => { if (o.isSkinnedMesh) o.frustumCulled = false; }); // bone-driven meshes outrun their static bounds
+  const tint = { Wolf3D_Outfit_Top: 0x2a3550, Wolf3D_Outfit_Bottom: 0x2b2b30, Wolf3D_Outfit_Footwear: 0x222222 }; // the sample avatar wears a pink suit
+  m.scene.traverse(o => { if (o.isMesh && tint[o.material?.name] !== undefined) o.material.color.setHex(tint[o.material.name]); });
   mixer = new THREE.AnimationMixer(target);
   for (const clip of s.animations) if (clip.name !== 'TPose') actions[clip.name] = mixer.clipAction(bake(m.scene, s.scene, target, clip));
   person.add(m.scene);
   play('Idle');
   const pilot = cloneSkinned(m.scene); // T-pose, prone under the wing
-  pilot.rotation.set(-Math.PI / 2, Math.PI, 0); pilot.position.set(0, -1.0, 0.9);
+  pilot.rotation.set(-Math.PI / 2, 0, 0); pilot.position.set(0, -1.0, 0.9);
   glider.add(pilot);
 }).catch(err => console.error('character load failed', err));
 
@@ -305,8 +307,9 @@ function groundUnder(p) { return cast(tmp.copy(p).setY(p.y + 1.5), DOWN, 3000) |
 function stepWalk(dt) {
   if (spawning) {
     const ground = groundUnder(feet);
-    const settled = tiles.loadProgress >= 1; // wait for the detailed tiles, not the coarse placeholder
-    if (!ground || !settled) return;
+    settledFrames = tiles.loadProgress >= 1 ? settledFrames + 1 : 0; // the queue empties briefly between refinement rounds
+    spawnTimer += dt;
+    if (!ground || (settledFrames < 30 && spawnTimer < 8)) return; // settled, or 8 s cap so a busy area cannot hold the curtain forever
     feet.y = ground.point.y; grounded = true; spawning = false;
     $('loading').style.display = 'none';
   }
@@ -335,7 +338,7 @@ function stepWalk(dt) {
     else { feet.y = nextY; grounded = false; }
   } else vy = 0; // tile under us unloaded: hold altitude instead of falling through the earth
   person.position.copy(feet);
-  person.rotation.y = yaw + Math.PI; // RPM avatars face +Z
+  person.rotation.y = yaw; // this avatar faces -Z, same as our forward
   play(!grounded || speed === 0 ? 'Idle' : speed > WALK ? 'Run' : 'Walk');
 }
 
@@ -399,6 +402,22 @@ function updateCamera() {
 // ---- minimap: GTA style, bottom right, circular, rotates so your heading is up ----
 // ponytail: tile.openstreetmap.org is fine for a prototype, not for public launch. Swap host before shipping.
 const mm = $('minimap'), mctx = mm.getContext('2d'), tileCache = new Map();
+let mmZoom = 0; // user offset on top of the per-mode zoom level
+const mmView = {}; // what the last frame drew, for click-to-teleport
+mm.addEventListener('wheel', e => { e.preventDefault(); mmZoom = clamp(mmZoom - Math.sign(e.deltaY), -4, 3); }, { passive: false });
+$('zin').addEventListener('click', () => { mmZoom = Math.min(3, mmZoom + 1); });
+$('zout').addEventListener('click', () => { mmZoom = Math.max(-4, mmZoom - 1); });
+mm.addEventListener('click', e => {
+  if (!mmView.n || spawning) return;
+  const rect = mm.getBoundingClientRect(), k = mm.width / rect.width;
+  const px = (e.clientX - rect.left) * k - mm.width / 2, py = (e.clientY - rect.top) * k - mm.height / 2;
+  if (px * px + py * py > (mm.width / 2 - 6) ** 2) return; // outside the disc
+  const c = Math.cos(mmView.bearing), sn = Math.sin(mmView.bearing); // undo the heading-up rotation
+  const ux = px * c - py * sn, uy = px * sn + py * c;
+  const tx = mmView.tx + ux / 256, ty = mmView.ty + uy / 256;
+  const lon = tx / mmView.n * 360 - 180, lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * ty / mmView.n))) * RAD2DEG;
+  setOrigin(lat, lon);
+});
 function osmTile(z, x, y) {
   const k = `${z}/${x}/${y}`;
   if (!tileCache.has(k)) { const im = new Image(); im.src = `https://tile.openstreetmap.org/${k}.png`; tileCache.set(k, im); }
@@ -408,7 +427,7 @@ function drawMinimap() {
   if (!tiles.root) return; // no tileset yet: group transform is identity
   const p = mode === 'drive' ? car.position : mode === 'glide' ? glider.position : feet;
   const heading = mode === 'drive' ? car.rotation.y : mode === 'glide' ? gYaw : yaw;
-  const Z = mode === 'glide' ? 14 : mode === 'drive' ? 16 : 17;
+  const Z = clamp((mode === 'glide' ? 14 : mode === 'drive' ? 16 : 17) + mmZoom, 3, 19);
   const { lat, lon } = worldToLatLon(p);
   const n = 2 ** Z, latR = lat * DEG2RAD;
   const tx = (lon + 180) / 360 * n, ty = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
@@ -416,6 +435,7 @@ function drawMinimap() {
   // bearing of the heading: from two world points, no axis assumptions
   const ahead = worldToLatLon(p.clone().add(fwdOf(heading).multiplyScalar(10)));
   const bearing = Math.atan2((ahead.lon - lon) * Math.cos(latR), ahead.lat - lat);
+  Object.assign(mmView, { tx, ty, n, bearing });
   mctx.clearRect(0, 0, W, W);
   mctx.save();
   mctx.beginPath(); mctx.arc(cx, cy, r, 0, Math.PI * 2); mctx.clip();
