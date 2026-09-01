@@ -78,7 +78,7 @@ addEventListener('keydown', e => {
 });
 addEventListener('keyup', e => keys.delete(e.code));
 renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
-let camYaw = 0, camPitch = 0.25, orbit = 0; // orbit = mouse offset from vehicle heading
+let camYaw = 0, camPitch = 0.25, orbit = 0, zoom = 1; // orbit = mouse offset from vehicle heading; zoom scales camera distance
 addEventListener('mousemove', e => {
   if (document.pointerLockElement !== renderer.domElement) return;
   camYaw -= e.movementX * 0.002; orbit -= e.movementX * 0.002;
@@ -326,7 +326,7 @@ function stepGlide(dt) {
 function updateCamera() {
   const anchor = mode === 'drive' ? car.position : mode === 'glide' ? glider.position : feet;
   const focus = anchor.clone(); focus.y += mode === 'drive' ? 1.6 : mode === 'glide' ? 0.5 : 1.5;
-  const dist = mode === 'drive' ? 9 : mode === 'glide' ? 14 : 5;
+  const dist = (mode === 'drive' ? 9 : mode === 'glide' ? 14 : 5) * zoom;
   const pitch = camPitch;
   const off = new THREE.Vector3(Math.sin(camYaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(camYaw) * Math.cos(pitch)).multiplyScalar(dist);
   const hit = cast(focus, tmp2.copy(off).normalize(), dist);
@@ -376,6 +376,8 @@ const clock = new THREE.Clock();
 let mmTimer = 0;
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.05);
+  if (keys.has('ArrowUp')) zoom = Math.max(0.3, zoom * Math.exp(-2 * dt));
+  if (keys.has('ArrowDown')) zoom = Math.min(6, zoom * Math.exp(2 * dt));
   if (mode === 'drive') stepDrive(dt); else if (mode === 'glide') stepGlide(dt); else stepWalk(dt);
   updateCamera();
   camera.updateMatrixWorld();
@@ -386,6 +388,6 @@ renderer.setAnimationLoop(() => {
     ? `${Math.abs(carSpeed * 3.6).toFixed(0)} km/h\nWS gas/reverse · AD steer · Space brake · V exit`
     : mode === 'glide'
       ? `${(gSpeed * 3.6).toFixed(0)} km/h · ${glider.position.y.toFixed(0)} m\nW dive · S climb · AD turn · Shift sprint · H land`
-      : `${grounded ? '' : 'air · '}WASD move · Shift run · Space jump · V car · H glider · click to look`;
+      : `${grounded ? '' : 'air · '}WASD move · Shift run · Space jump · V car · H glider · ↑↓ zoom · click to look`;
   attribution.textContent = tiles.getAttributions().map(a => a.value).join(' · ');
 });
