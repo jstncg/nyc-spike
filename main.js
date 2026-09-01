@@ -13,10 +13,10 @@ import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
 const ORIGIN = { lat: 40.758, lon: -73.9855 }; // Times Square. 1 unit = 1 m, Y up.
 const RADIUS = 0.45, WALK = 4, RUN = 9, JUMP = 6, GRAVITY = -20;
 const CAR = { accel: 12, brake: 25, maxSpeed: 40, drag: 0.6, turn: 1.6, length: 4.5, width: 1.9 };
-const GLIDER = { launch: 300, cruise: 22, min: 10, max: 70, sink: 1.5, turn: 1.1, pitchRate: 1.2, ceiling: 2500 };
+const GLIDER = { launch: 300, liftSpeed: 60, cruise: 22, min: 10, max: 70, sink: 1.5, turn: 1.1, pitchRate: 1.2, ceiling: 2500 };
 const KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY;
 const { DEG2RAD, RAD2DEG, clamp, lerp } = THREE.MathUtils;
-const CREDITS = 'Character: Ready Player Me (three.js examples) · Car: Ferrari 458 by vicent091036 (Sketchfab) · Map: © OpenStreetMap · Search: Photon/komoot';
+$('credits').title = 'Character: Ready Player Me avatar (three.js examples) · Car: Ferrari 458 by vicent091036 (Sketchfab, CC-BY) · Search: Photon by komoot';
 
 const $ = id => document.getElementById(id);
 if (!KEY) {
@@ -241,7 +241,7 @@ function makeGlider() {
 const feet = new THREE.Vector3(0, 300, 0);
 let vy = 0, grounded = false, yaw = 0, speed = 0, mode = 'walk';
 let car = null, carSpeed = 0, wheels = [];
-let gYaw = 0, gPitch = 0, gSpeed = 0, gBank = 0;
+let gYaw = 0, gPitch = 0, gSpeed = 0, gBank = 0, lift = 0; // lift = metres still to rise straight up after launch
 
 function setMode(m) {
   mode = m;
@@ -269,7 +269,7 @@ function toggleCar() {
 function toggleGlider() {
   if (mode === 'drive' || spawning) return;
   if (mode === 'walk') {
-    glider.position.copy(feet).addScaledVector(fwdOf(camYaw), 4); glider.position.y += GLIDER.launch;
+    glider.position.copy(feet); glider.position.y += 2; lift = GLIDER.launch; // rise from where you stand
     gYaw = camYaw; gPitch = 0; gSpeed = GLIDER.cruise; gBank = 0;
     setMode('glide');
   } else land();
@@ -361,6 +361,13 @@ function stepDrive(dt) {
 }
 
 function stepGlide(dt) {
+  if (lift > 0) { // vertical ascent, then hand over to flight
+    const dy = Math.min(lift, GLIDER.liftSpeed * dt);
+    glider.position.y += dy; lift -= dy;
+    glider.rotation.set(0, gYaw, 0);
+    camYaw = gYaw + orbit;
+    return;
+  }
   const pitchIn = (keys.has('KeyS') ? 1 : 0) - (keys.has('KeyW') ? 1 : 0); // S nose up, W nose down
   const steer = (keys.has('KeyA') ? 1 : 0) - (keys.has('KeyD') ? 1 : 0);
   gPitch = clamp(gPitch + pitchIn * GLIDER.pitchRate * dt, -0.9, 0.45);
@@ -456,7 +463,7 @@ function drawMinimap() {
   mctx.fillStyle = '#fff'; mctx.strokeStyle = '#000'; mctx.lineWidth = 2;
   mctx.beginPath(); mctx.moveTo(cx, cy - 11); mctx.lineTo(cx + 8, cy + 8); mctx.lineTo(cx, cy + 3); mctx.lineTo(cx - 8, cy + 8); mctx.closePath();
   mctx.fill(); mctx.stroke();
-  $('coords').textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+  $('coords').textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)} · © OpenStreetMap`;
 }
 
 // ---- boot ----
@@ -484,7 +491,7 @@ renderer.setAnimationLoop(() => {
   hud.textContent = mode === 'drive'
     ? `${Math.abs(carSpeed * 3.6).toFixed(0)} km/h\nWS gas/reverse · AD steer · Space brake · V exit`
     : mode === 'glide'
-      ? `${(gSpeed * 3.6).toFixed(0)} km/h · ${glider.position.y.toFixed(0)} m\nW dive · S climb · AD turn · Shift sprint · H land`
+      ? lift > 0 ? `rising… ${(GLIDER.launch - lift).toFixed(0)} m` : `${(gSpeed * 3.6).toFixed(0)} km/h · ${glider.position.y.toFixed(0)} m\nW dive · S climb · AD turn · Shift sprint · H land`
       : `${grounded ? '' : 'air · '}WASD move · Shift run · Space jump · V car · H glider · ↑↓ zoom · click to look`;
-  attribution.textContent = [...tiles.getAttributions().map(a => a.value), CREDITS].join(' · ');
+  attribution.textContent = tiles.getAttributions().map(a => a.value).join(' · '); // Google requires this line, verbatim, along the bottom
 });
