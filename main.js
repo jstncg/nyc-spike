@@ -16,7 +16,7 @@ const CAR = { accel: 12, brake: 25, maxSpeed: 40, drag: 0.6, turn: 1.6, length: 
 const GLIDER = { launch: 300, cruise: 22, min: 10, max: 70, sink: 1.5, turn: 1.1, pitchRate: 1.2, ceiling: 2500 };
 const KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY;
 const { DEG2RAD, RAD2DEG, clamp, lerp } = THREE.MathUtils;
-const CREDITS = 'Character: Mixamo (three.js examples) · Car: Ferrari 458 by vicent091036 (Sketchfab) · Map: © OpenStreetMap · Search: Photon/komoot';
+const CREDITS = 'Character: Ready Player Me (three.js examples) · Car: Ferrari 458 by vicent091036 (Sketchfab) · Map: © OpenStreetMap · Search: Photon/komoot';
 
 const $ = id => document.getElementById(id);
 if (!KEY) {
@@ -154,23 +154,23 @@ $('go').addEventListener('submit', async e => {
 });
 
 // ---- models ----
-// ponytail: Soldier.glb is loaded only for its Idle/Walk/Run clips (same Mixamo rig as Michelle). Bake the clips into one file if 2 MB matters.
+// ponytail: Soldier.glb is loaded only for its Idle/Walk/Run clips (Mixamo rig, same skeleton as the Ready Player Me guy). Bake the clips into one file if 2 MB matters.
 const gltf = new GLTFLoader().setDRACOLoader(draco); // ferrari.glb is Draco-compressed
 const load = url => new Promise((res, rej) => gltf.load(url, res, undefined, rej));
 let mixer, actions = {}, current, carModel = null;
 const person = new THREE.Group(); scene.add(person);
 const glider = makeGlider(); glider.visible = false; scene.add(glider);
 
-Promise.all([load('/Michelle.glb'), load('/Soldier.glb')]).then(([m, s]) => {
+Promise.all([load('/guy.glb'), load('/Soldier.glb')]).then(([m, s]) => {
   const skinned = root => { let r; root.traverse(o => { if (!r && o.isSkinnedMesh) r = o; }); return r; };
   const target = skinned(m.scene);
-  target.frustumCulled = false; // bone-driven mesh outruns its static bounds
+  m.scene.traverse(o => { if (o.isSkinnedMesh) o.frustumCulled = false; }); // bone-driven meshes outrun their static bounds
   mixer = new THREE.AnimationMixer(target);
   for (const clip of s.animations) if (clip.name !== 'TPose') actions[clip.name] = mixer.clipAction(bake(m.scene, s.scene, target, clip));
   person.add(m.scene);
   play('Idle');
   const pilot = cloneSkinned(m.scene); // T-pose, prone under the wing
-  pilot.rotation.set(-Math.PI / 2, 0, 0); pilot.position.set(0, -1.0, 0.9);
+  pilot.rotation.set(-Math.PI / 2, Math.PI, 0); pilot.position.set(0, -1.0, 0.9);
   glider.add(pilot);
 }).catch(err => console.error('character load failed', err));
 
@@ -179,7 +179,7 @@ Promise.all([load('/Michelle.glb'), load('/Soldier.glb')]).then(([m, s]) => {
 // Both model roots must sit at the identity while baking.
 function bake(tgtRoot, srcRoot, tgtSkin, clip, fps = 30) {
   const mx = new THREE.AnimationMixer(srcRoot); mx.clipAction(clip).play();
-  const bones = []; tgtRoot.traverse(o => { if (o.isBone && srcRoot.getObjectByName(o.name)) bones.push([o, srcRoot.getObjectByName(o.name)]); });
+  const bones = []; tgtRoot.traverse(o => { const sb = o.isBone && srcRoot.getObjectByName('mixamorig' + o.name); if (sb) bones.push([o, sb]); }); // RPM bone names lack the mixamorig prefix
   const rest = bones.map(([b]) => [b, b.position.clone(), b.quaternion.clone(), b.scale.clone()]);
   const n = Math.ceil(clip.duration * fps), times = [], quats = bones.map(() => []), hipPos = [];
   const qw = new THREE.Quaternion(), qp = new THREE.Quaternion(), pw = new THREE.Vector3(), inv = new THREE.Matrix4();
@@ -190,12 +190,12 @@ function bake(tgtRoot, srcRoot, tgtSkin, clip, fps = 30) {
       sb.getWorldQuaternion(qw); tb.parent.getWorldQuaternion(qp);
       tb.quaternion.copy(qp.invert().multiply(qw)); tb.updateMatrixWorld();
       quats[i].push(...tb.quaternion.toArray());
-      if (tb.name === 'mixamorigHips') { sb.getWorldPosition(pw); pw.applyMatrix4(inv.copy(tb.parent.matrixWorld).invert()); hipPos.push(...pw.toArray()); }
+      if (tb.name === 'Hips') { sb.getWorldPosition(pw); pw.applyMatrix4(inv.copy(tb.parent.matrixWorld).invert()); hipPos.push(...pw.toArray()); }
     });
   }
   for (const [b, p, q, sc] of rest) { b.position.copy(p); b.quaternion.copy(q); b.scale.copy(sc); }
   const tracks = bones.map(([tb], i) => new THREE.QuaternionKeyframeTrack(`.bones[${tb.name}].quaternion`, times, quats[i]));
-  tracks.push(new THREE.VectorKeyframeTrack('.bones[mixamorigHips].position', times, hipPos));
+  tracks.push(new THREE.VectorKeyframeTrack('.bones[Hips].position', times, hipPos));
   return new THREE.AnimationClip(clip.name, clip.duration, tracks);
 }
 
@@ -207,7 +207,7 @@ load('/ferrari.glb').then(g => {
   model.getObjectByName('body').material = body;
   for (const n of ['rim_fl', 'rim_fr', 'rim_rr', 'rim_rl', 'trim']) model.getObjectByName(n).material = details;
   model.getObjectByName('glass').material = glass;
-  model.rotation.y = Math.PI; // model faces +Z, our forward is -Z
+  // model already faces -Z (front wheels at negative z), same as our forward
   model.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(model);
   model.position.y -= box.min.y; // wheels on the ground
@@ -335,7 +335,7 @@ function stepWalk(dt) {
     else { feet.y = nextY; grounded = false; }
   } else vy = 0; // tile under us unloaded: hold altitude instead of falling through the earth
   person.position.copy(feet);
-  person.rotation.y = yaw; // this export faces -Z, same as our forward
+  person.rotation.y = yaw + Math.PI; // RPM avatars face +Z
   play(!grounded || speed === 0 ? 'Idle' : speed > WALK ? 'Run' : 'Walk');
 }
 
@@ -353,7 +353,7 @@ function stepDrive(dt) {
   if (hit) carSpeed = 0; else car.position.add(move);
   const ground = groundUnder(car.position);
   if (ground) car.position.y += (ground.point.y - car.position.y) * Math.min(1, 10 * dt);
-  for (const w of wheels) if (w) w.rotation.x += carSpeed * dt / 0.36;
+  for (const w of wheels) if (w) w.rotation.x -= carSpeed * dt / 0.36;
   camYaw = car.rotation.y + orbit; // orbit = free mouse look, follows the car as it turns
 }
 
