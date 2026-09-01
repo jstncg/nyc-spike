@@ -10,7 +10,7 @@ import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
 const ORIGIN = { lat: 40.758, lon: -73.9855 }; // Times Square. 1 unit = 1 m, Y up.
 const RADIUS = 0.45, WALK = 4, RUN = 9, JUMP = 6, GRAVITY = -20;
 const CAR = { accel: 12, brake: 25, maxSpeed: 40, drag: 0.6, turn: 1.6, length: 4.4, width: 1.9 };
-const GLIDER = { launch: 150, cruise: 22, min: 10, max: 70, sink: 1.5, turn: 1.1, pitchRate: 1.2, ceiling: 2500 };
+const GLIDER = { launch: 300, cruise: 22, min: 10, max: 70, sink: 1.5, turn: 1.1, pitchRate: 1.2, ceiling: 2500 };
 const KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY;
 const { DEG2RAD, RAD2DEG, clamp, lerp } = THREE.MathUtils;
 
@@ -29,6 +29,7 @@ document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x9ec8ff);
+scene.fog = new THREE.Fog(0x9ec8ff, 2500, 14000); // far haze so distant tiles do not pop
 scene.add(new THREE.HemisphereLight(0xffffff, 0x666677, 2.2));
 const sun = new THREE.DirectionalLight(0xffffff, 2.2);
 sun.position.set(50, 100, 30);
@@ -81,7 +82,7 @@ let camYaw = 0, camPitch = 0.25, orbit = 0; // orbit = mouse offset from vehicle
 addEventListener('mousemove', e => {
   if (document.pointerLockElement !== renderer.domElement) return;
   camYaw -= e.movementX * 0.002; orbit -= e.movementX * 0.002;
-  camPitch = clamp(camPitch + e.movementY * 0.002, -0.3, 1.2);
+  camPitch = clamp(camPitch + e.movementY * 0.002, -1.0, 1.4);
 });
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
@@ -296,8 +297,7 @@ function stepDrive(dt) {
   const ground = groundUnder(car.position);
   if (ground) car.position.y += (ground.point.y - car.position.y) * Math.min(1, 10 * dt);
   for (const w of car.userData.wheels) w.rotation.x -= carSpeed * dt / 0.36;
-  orbit *= Math.exp(-2 * dt); // camera drifts back behind the car
-  camYaw = car.rotation.y + orbit;
+  camYaw = car.rotation.y + orbit; // orbit = free mouse look, follows the car as it turns
 }
 
 function stepGlide(dt) {
@@ -318,7 +318,6 @@ function stepGlide(dt) {
   const ground = groundUnder(glider.position);
   if (ground && glider.position.y - ground.point.y < 2.5) return land();
   glider.rotation.set(0, 0, 0); glider.rotateY(gYaw); glider.rotateX(gPitch); glider.rotateZ(gBank);
-  orbit *= Math.exp(-2 * dt);
   camYaw = gYaw + orbit;
 }
 
@@ -327,7 +326,7 @@ function updateCamera() {
   const anchor = mode === 'drive' ? car.position : mode === 'glide' ? glider.position : feet;
   const focus = anchor.clone(); focus.y += mode === 'drive' ? 1.6 : mode === 'glide' ? 0.5 : 1.5;
   const dist = mode === 'drive' ? 9 : mode === 'glide' ? 14 : 5;
-  const pitch = mode === 'glide' ? clamp(camPitch + 0.15 - gPitch * 0.5, -0.2, 1.2) : camPitch;
+  const pitch = camPitch;
   const off = new THREE.Vector3(Math.sin(camYaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(camYaw) * Math.cos(pitch)).multiplyScalar(dist);
   const hit = cast(focus, tmp2.copy(off).normalize(), dist);
   if (hit) off.setLength(Math.max(0.5, hit.distance - 0.3));
@@ -348,6 +347,7 @@ function drawMinimap() {
   const heading = mode === 'drive' ? car.rotation.y : mode === 'glide' ? gYaw : camYaw;
   const Z = mode === 'glide' ? 14 : 16; // zoom out in the air
   const { lat, lon } = worldToLatLon(p);
+  if (!tiles.root) return; // no tileset yet: group transform is identity
   const n = 2 ** Z, latR = lat * DEG2RAD;
   const tx = (lon + 180) / 360 * n, ty = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
   const cx = mm.width / 2, cy = mm.height / 2, S = 256;
