@@ -2,16 +2,24 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>NYC spike</title>
+  <title>NYC</title>
   <style>
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font: 13px monospace; color: #fff; }
     canvas { display: block; }
-    #hud { position: fixed; top: 8px; left: 8px; white-space: pre; text-shadow: 0 0 3px #000; }
+    #hud { position: fixed; bottom: 28px; left: 12px; white-space: pre; text-shadow: 0 0 3px #000; font-size: 14px; }
     #attribution { position: fixed; bottom: 0; left: 0; right: 0; padding: 4px 8px; background: rgba(0,0,0,.6); font-size: 11px; }
+    #go { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); display: flex; gap: 6px; background: rgba(0,0,0,.6); padding: 8px; border-radius: 8px; }
+    #q { width: 420px; padding: 8px 10px; border: 1px solid #555; border-radius: 6px; background: #111; color: #fff; font: inherit; }
+    #go button { padding: 8px 14px; border: 0; border-radius: 6px; background: #3478f6; color: #fff; font: inherit; cursor: pointer; }
+    #map { position: fixed; top: 12px; right: 12px; background: rgba(0,0,0,.6); padding: 6px; border-radius: 8px; text-align: center; }
+    #minimap { display: block; border-radius: 4px; }
+    #coords { font-size: 11px; padding-top: 4px; opacity: .8; }
   </style>
 </head>
 <body>
-  <div id="hud">click to lock mouse · WASD move · Shift run · Space jump</div>
+  <form id="go"><input id="q" placeholder="Address, place, or 40.7580, -73.9855" autocomplete="off" /><button>Go</button></form>
+  <div id="map"><canvas id="minimap" width="220" height="220"></canvas><div id="coords"></div></div>
+  <div id="hud"></div>
   <div id="attribution"></div>
   <script type="module" src="/main.js"></script>
 </body>
