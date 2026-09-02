@@ -186,7 +186,7 @@ const gltf = new GLTFLoader().setDRACOLoader(draco); // ferrari.glb is Draco-com
 const load = url => new Promise((res, rej) => gltf.load(BASE + url, res, undefined, rej));
 let mixer, actions = {}, current, carModel = null, avatar = null, clips = [];
 const person = new THREE.Group(); scene.add(person);
-const glider = makeGlider(); glider.visible = false; scene.add(glider); glider.add(...gliderFlames);
+const glider = makeGlider(); glider.visible = false; scene.add(glider);
 
 Promise.all([load('guy.glb'), load('Soldier.glb')]).then(([m, s]) => {
   const target = skinned(m.scene);
@@ -279,6 +279,7 @@ function flicker(flames, on, dt) {
 }
 let carFlames = [];
 const gliderFlames = [makeFlame(-1.2, -0.25, 1.6), makeFlame(1.2, -0.25, 1.6)];
+glider.add(...gliderFlames);
 
 // ---- state ----
 const feet = new THREE.Vector3(0, 300, 0);
