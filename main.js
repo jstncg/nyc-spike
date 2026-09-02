@@ -15,10 +15,17 @@ const RADIUS = 0.45, WALK = 4, RUN = 9, JUMP = 6, GRAVITY = -20;
 const CAR = { accel: 12, brake: 25, maxSpeed: 40, drag: 0.6, turn: 1.6, length: 4.5, width: 1.9 };
 const GLIDER = { launch: 300, liftSpeed: 60, cruise: 22, min: 10, max: 70, sink: 1.5, turn: 1.1, pitchRate: 1.2, ceiling: 2500 };
 const KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY;
+const MP_URL = import.meta.env.VITE_MP_URL; // wss://<worker>/room/nyc — multiplayer is off when unset
+const BASE = import.meta.env.BASE_URL;
 const { DEG2RAD, RAD2DEG, clamp, lerp } = THREE.MathUtils;
-$('credits').title = 'Character: Ready Player Me avatar (three.js examples) · Car: Ferrari 458 by vicent091036 (Sketchfab, CC-BY) · Search: Photon by komoot';
+const LANDMARKS = [
+  ['Times Square', 40.7580, -73.9855], ['Empire State Building', 40.7484, -73.9857], ['NY Public Library', 40.7532, -73.9822],
+  ['Grand Central', 40.7527, -73.9772], ['Rockefeller Center', 40.7587, -73.9787], ['Bethesda Fountain', 40.7740, -73.9708],
+  ['Flatiron Building', 40.7411, -73.9897], ['Washington Square Arch', 40.7308, -73.9973], ['One World Trade', 40.7127, -74.0134], ['Brooklyn Bridge', 40.7061, -73.9969],
+];
 
 const $ = id => document.getElementById(id);
+$('credits').title = 'Character: Ready Player Me avatar (three.js examples) · Car: Ferrari 458 by vicent091036 (Sketchfab, CC-BY) · Search fallback: Photon by komoot';
 if (!KEY) {
   $('loading').textContent = 'Missing VITE_GOOGLE_MAPS_KEY. Copy .env.example to .env and fill it in.';
   throw new Error('missing key');
@@ -71,6 +78,9 @@ function worldToLatLon(p) {
   tiles.ellipsoid.getPositionToCartographic(p.clone().applyMatrix4(_inv), _cart);
   return { lat: _cart.lat * RAD2DEG, lon: _cart.lon * RAD2DEG };
 }
+const worldToEcef = p => p.clone().applyMatrix4(_inv.copy(tiles.group.matrixWorld).invert());
+const ecefToWorld = e => new THREE.Vector3(...e).applyMatrix4(tiles.group.matrixWorld);
+const latLonToWorld = (lat, lon, h = 0) => tiles.ellipsoid.getCartographicToPosition(lat * DEG2RAD, lon * DEG2RAD, h, new THREE.Vector3()).applyMatrix4(tiles.group.matrixWorld);
 function setOrigin(lat, lon, label = `${lat.toFixed(4)}, ${lon.toFixed(4)}`) {
   reorient.lat = lat * DEG2RAD; reorient.lon = lon * DEG2RAD; // survives root tileset refresh
   reorient.transformLatLonHeightToOrigin(reorient.lat, reorient.lon);
@@ -112,15 +122,30 @@ addEventListener('resize', () => {
   tiles.setResolutionFromRenderer(camera, renderer);
 });
 
-// ---- teleport bar with suggestions (Photon geocoder: free, no key, built for autocomplete) ----
-// ponytail: fair-use public instance. Self-host Photon or swap for Google Places before a public launch.
-const suggestions = new Map(); // label -> [lat, lon]
-const placeLabel = f => [f.properties.name, f.properties.street && f.properties.housenumber ? `${f.properties.housenumber} ${f.properties.street}` : f.properties.street, f.properties.city || f.properties.county, f.properties.state, f.properties.country].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(', ');
+// ---- search: Google Places (New) with the same key; falls back to Photon if Places is not enabled on the key ----
+let placesOK = true;
+const suggestions = new Map(); // label -> { lat, lon } | { placeId }
+const here = () => tiles.root ? worldToLatLon(feet) : ORIGIN;
 async function geocode(q, limit) {
-  const here = tiles.root ? worldToLatLon(feet) : ORIGIN;
-  const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=${limit}&lat=${here.lat}&lon=${here.lon}`;
-  const r = await fetch(url).then(r => r.json()).catch(() => null);
-  return (r?.features || []).map(f => ({ label: placeLabel(f), lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] }));
+  if (placesOK) {
+    const h = here();
+    const r = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': KEY },
+      body: JSON.stringify({ input: q, locationBias: { circle: { center: { latitude: h.lat, longitude: h.lon }, radius: 50000 } } }),
+    }).then(r => r.json()).catch(() => null);
+    if (r && !r.error) return (r.suggestions || []).filter(s => s.placePrediction).slice(0, limit).map(s => ({ label: s.placePrediction.text.text, placeId: s.placePrediction.placeId }));
+    placesOK = false; console.warn('Places API unavailable, falling back to Photon:', r?.error?.message);
+  }
+  // ponytail: Photon public instance is fair-use only. Enable "Places API (New)" on the key and this path is never taken.
+  const h = here();
+  const r = await fetch(`https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=${limit}&lat=${h.lat}&lon=${h.lon}`).then(r => r.json()).catch(() => null);
+  const label = f => [f.properties.name, f.properties.street && f.properties.housenumber ? `${f.properties.housenumber} ${f.properties.street}` : f.properties.street, f.properties.city || f.properties.county, f.properties.state].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(', ');
+  return (r?.features || []).map(f => ({ label: label(f), lat: f.geometry.coordinates[1], lon: f.geometry.coordinates[0] }));
+}
+async function resolve(s) {
+  if (s.lat !== undefined) return s;
+  const r = await fetch(`https://places.googleapis.com/v1/places/${s.placeId}`, { headers: { 'X-Goog-Api-Key': KEY, 'X-Goog-FieldMask': 'location' } }).then(r => r.json()).catch(() => null);
+  return r?.location ? { lat: r.location.latitude, lon: r.location.longitude } : null;
 }
 let suggestTimer = 0;
 $('q').addEventListener('input', () => {
@@ -131,7 +156,7 @@ $('q').addEventListener('input', () => {
     const list = await geocode(q, 6);
     if ($('q').value.trim() !== q) return; // stale
     suggestions.clear();
-    $('places').replaceChildren(...list.map(p => { suggestions.set(p.label, [p.lat, p.lon]); const o = document.createElement('option'); o.value = p.label; return o; }));
+    $('places').replaceChildren(...list.map(p => { suggestions.set(p.label, p); const o = document.createElement('option'); o.value = p.label; return o; }));
   }, 250);
 });
 $('go').addEventListener('submit', async e => {
@@ -139,42 +164,46 @@ $('go').addEventListener('submit', async e => {
   const q = $('q').value.trim();
   if (!q) return;
   const m = q.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
-  let lat, lon, label = q;
-  if (m) [lat, lon] = [+m[1], +m[2]];
-  else if (suggestions.has(q)) [lat, lon] = suggestions.get(q);
-  else {
-    $('q').disabled = true;
-    const [hit] = await geocode(q, 1);
-    $('q').disabled = false;
-    if (!hit) { $('q').value = ''; $('q').placeholder = `Not found: ${q}`; return; }
-    ({ lat, lon, label } = hit);
-  }
-  setOrigin(lat, lon, label.split(',').slice(0, 2).join(','));
+  let hit = m ? { lat: +m[1], lon: +m[2] } : suggestions.get(q);
+  $('q').disabled = true;
+  if (!hit) hit = (await geocode(q, 1))[0];
+  if (hit) hit = await resolve(hit);
+  $('q').disabled = false;
+  if (!hit) { $('q').value = ''; $('q').placeholder = `Not found: ${q}`; return; }
+  setOrigin(hit.lat, hit.lon, q.split(',').slice(0, 2).join(','));
   $('q').blur(); $('q').value = '';
+});
+
+// ---- share link ----
+$('share').addEventListener('click', async () => {
+  await navigator.clipboard.writeText(location.href).catch(() => {});
+  $('share').textContent = 'Copied'; setTimeout(() => { $('share').textContent = 'Copy link'; }, 1500);
 });
 
 // ---- models ----
 // ponytail: Soldier.glb is loaded only for its Idle/Walk/Run clips (Mixamo rig, same skeleton as the Ready Player Me guy). Bake the clips into one file if 2 MB matters.
 const gltf = new GLTFLoader().setDRACOLoader(draco); // ferrari.glb is Draco-compressed
-const load = url => new Promise((res, rej) => gltf.load(url, res, undefined, rej));
-let mixer, actions = {}, current, carModel = null;
+const load = url => new Promise((res, rej) => gltf.load(BASE + url, res, undefined, rej));
+let mixer, actions = {}, current, carModel = null, avatar = null, clips = [];
 const person = new THREE.Group(); scene.add(person);
 const glider = makeGlider(); glider.visible = false; scene.add(glider);
 
-Promise.all([load('/guy.glb'), load('/Soldier.glb')]).then(([m, s]) => {
-  const skinned = root => { let r; root.traverse(o => { if (!r && o.isSkinnedMesh) r = o; }); return r; };
+Promise.all([load('guy.glb'), load('Soldier.glb')]).then(([m, s]) => {
   const target = skinned(m.scene);
   m.scene.traverse(o => { if (o.isSkinnedMesh) o.frustumCulled = false; }); // bone-driven meshes outrun their static bounds
   const tint = { Wolf3D_Outfit_Top: 0x2a3550, Wolf3D_Outfit_Bottom: 0x2b2b30, Wolf3D_Outfit_Footwear: 0x222222 }; // the sample avatar wears a pink suit
   m.scene.traverse(o => { if (o.isMesh && tint[o.material?.name] !== undefined) o.material.color.setHex(tint[o.material.name]); });
+  clips = s.animations.filter(c => c.name !== 'TPose').map(c => bake(m.scene, s.scene, target, c));
   mixer = new THREE.AnimationMixer(target);
-  for (const clip of s.animations) if (clip.name !== 'TPose') actions[clip.name] = mixer.clipAction(bake(m.scene, s.scene, target, clip));
+  for (const c of clips) actions[c.name] = mixer.clipAction(c);
+  avatar = m.scene;
   person.add(m.scene);
   play('Idle');
   const pilot = cloneSkinned(m.scene); // T-pose, prone under the wing
   pilot.rotation.set(-Math.PI / 2, 0, 0); pilot.position.set(0, -1.0, 0.9);
   glider.add(pilot);
 }).catch(err => console.error('character load failed', err));
+function skinned(root) { let r; root.traverse(o => { if (!r && o.isSkinnedMesh) r = o; }); return r; }
 
 // Retarget by copying each source bone's world rotation onto the same-named target bone, top down.
 // Both are Mixamo T-pose rigs, so bind orientations agree in world space even though local rest poses differ.
@@ -201,7 +230,7 @@ function bake(tgtRoot, srcRoot, tgtSkin, clip, fps = 30) {
   return new THREE.AnimationClip(clip.name, clip.duration, tracks);
 }
 
-load('/ferrari.glb').then(g => {
+load('ferrari.glb').then(g => {
   const model = g.scene;
   const body = new THREE.MeshPhysicalMaterial({ color: 0xd0021b, metalness: 1, roughness: 0.5, clearcoat: 1, clearcoatRoughness: 0.03 });
   const details = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 1, roughness: 0.5 });
@@ -242,6 +271,8 @@ const feet = new THREE.Vector3(0, 300, 0);
 let vy = 0, grounded = false, yaw = 0, speed = 0, mode = 'walk';
 let car = null, carSpeed = 0, wheels = [];
 let gYaw = 0, gPitch = 0, gSpeed = 0, gBank = 0, lift = 0; // lift = metres still to rise straight up after launch
+const anchor = () => mode === 'drive' ? car.position : mode === 'glide' ? glider.position : feet;
+const heading = () => mode === 'drive' ? car.rotation.y : mode === 'glide' ? gYaw : yaw;
 
 function setMode(m) {
   mode = m;
@@ -396,8 +427,7 @@ function updateCamera() {
     camera.lookAt(feet.x, feet.y - 100, feet.z - 1);
     return;
   }
-  const anchor = mode === 'drive' ? car.position : mode === 'glide' ? glider.position : feet;
-  const focus = anchor.clone(); focus.y += mode === 'drive' ? 1.6 : mode === 'glide' ? 0.5 : 1.5;
+  const focus = anchor().clone(); focus.y += mode === 'drive' ? 1.6 : mode === 'glide' ? 0.5 : 1.5;
   const dist = (mode === 'drive' ? 9 : mode === 'glide' ? 14 : 5) * zoom;
   const off = new THREE.Vector3(Math.sin(camYaw) * Math.cos(camPitch), Math.sin(camPitch), Math.cos(camYaw) * Math.cos(camPitch)).multiplyScalar(dist);
   const hit = mode !== 'glide' && cast(focus, tmp2.copy(off).normalize(), dist);
@@ -406,11 +436,94 @@ function updateCamera() {
   camera.lookAt(focus);
 }
 
+// ---- landmarks: visit all ten, timer runs from your first step ----
+const visited = new Set(JSON.parse(localStorage.getItem('nyc.visited') || '[]'));
+let questStart = +localStorage.getItem('nyc.start') || 0, questEnd = +localStorage.getItem('nyc.end') || 0;
+function renderQuests() {
+  $('quests').replaceChildren(...LANDMARKS.map(([name]) => { const li = document.createElement('li'); li.textContent = name; li.className = visited.has(name) ? 'done' : ''; li.onclick = () => { const l = LANDMARKS.find(x => x[0] === name); setOrigin(l[1], l[2], name); }; return li; }));
+}
+function updateQuests(dt) {
+  if (spawning) return;
+  if (!questStart && (speed > 0 || mode !== 'walk')) { questStart = Date.now(); localStorage.setItem('nyc.start', questStart); }
+  const p = anchor();
+  for (const [name, lat, lon] of LANDMARKS) {
+    if (visited.has(name)) continue;
+    const w = latLonToWorld(lat, lon);
+    if ((w.x - p.x) ** 2 + (w.z - p.z) ** 2 < 60 * 60) {
+      visited.add(name); localStorage.setItem('nyc.visited', JSON.stringify([...visited])); renderQuests();
+      if (visited.size === LANDMARKS.length) { questEnd = Date.now(); localStorage.setItem('nyc.end', questEnd); }
+    }
+  }
+  const t = questStart ? ((questEnd || Date.now()) - questStart) / 1000 : 0;
+  $('qtimer').textContent = `${visited.size}/${LANDMARKS.length} · ${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+}
+$('qreset').addEventListener('click', () => { visited.clear(); questStart = questEnd = 0; ['nyc.visited', 'nyc.start', 'nyc.end'].forEach(k => localStorage.removeItem(k)); renderQuests(); });
+renderQuests();
+
+// ---- multiplayer: Cloudflare Durable Object room broadcasting JSON snapshots at 8 Hz (server/worker.js) ----
+// Positions travel as ECEF so players with different local origins agree. Yaw travels in the local frame: ENU frames across NYC differ by well under a degree.
+const others = new Map(); // id -> { group, body, mode, target: Vector3, yaw, speed, mixer, actions, current, seen }
+let ws = null, myId = null, sendTimer = 0;
+function connectMP() {
+  if (!MP_URL) return;
+  ws = new WebSocket(MP_URL);
+  ws.onmessage = e => {
+    const msg = JSON.parse(e.data);
+    if (msg.t === 'hello') myId = msg.id;
+    if (msg.t === 'state') applyPlayers(msg.players);
+  };
+  ws.onclose = () => { ws = null; setTimeout(connectMP, 3000); };
+  ws.onerror = () => ws?.close();
+}
+function sendState(dt) {
+  if (!ws || ws.readyState !== 1 || spawning || !tiles.root) return;
+  if ((sendTimer += dt) < 0.125) return;
+  sendTimer = 0;
+  const e = worldToEcef(anchor());
+  ws.send(JSON.stringify({ t: 'pos', e: [e.x, e.y, e.z].map(v => +v.toFixed(2)), yaw: +heading().toFixed(3), mode, speed: mode === 'walk' ? speed : 1 }));
+}
+function applyPlayers(players) {
+  const now = performance.now();
+  for (const p of players) {
+    if (p.id === myId) continue;
+    let o = others.get(p.id);
+    if (!o) { o = { group: new THREE.Group(), mode: null, target: new THREE.Vector3(), yaw: 0, speed: 0 }; scene.add(o.group); others.set(p.id, o); }
+    if (o.mode !== p.mode) rebuildOther(o, p.mode);
+    o.target.copy(ecefToWorld(p.e)); o.yaw = p.yaw; o.speed = p.speed; o.seen = now;
+    if (!o.placed) { o.group.position.copy(o.target); o.placed = true; }
+  }
+  for (const [id, o] of others) if (!players.some(p => p.id === id) || now - o.seen > 10000) { scene.remove(o.group); others.delete(id); }
+}
+function rebuildOther(o, m) {
+  o.group.clear(); o.mode = m; o.mixer = null;
+  if (m === 'walk' && avatar) {
+    const body = cloneSkinned(avatar); body.traverse(x => { if (x.isSkinnedMesh) x.frustumCulled = false; });
+    o.mixer = new THREE.AnimationMixer(skinned(body)); o.actions = Object.fromEntries(clips.map(c => [c.name, o.mixer.clipAction(c)])); o.current = null;
+    o.group.add(body);
+  } else if (m === 'drive' && carModel) o.group.add(carModel.clone());
+  else if (m === 'glide') o.group.add(makeGlider());
+}
+function updateOthers(dt) {
+  for (const o of others.values()) {
+    o.group.position.lerp(o.target, Math.min(1, 8 * dt));
+    let d = o.yaw - o.group.rotation.y; d = Math.atan2(Math.sin(d), Math.cos(d)); o.group.rotation.y += d * Math.min(1, 8 * dt);
+    o.group.visible = o.group.position.distanceTo(anchor()) < 3000;
+    if (o.mixer) {
+      const name = o.speed === 0 ? 'Idle' : o.speed > WALK ? 'Run' : 'Walk';
+      if (o.current !== name && o.actions[name]) { o.actions[name].reset().fadeIn(0.2).play(); if (o.current) o.actions[o.current].fadeOut(0.2); o.current = name; }
+      o.mixer.update(dt);
+    }
+  }
+}
+connectMP();
+
 // ---- minimap: GTA style, bottom right, circular, rotates so your heading is up ----
-// ponytail: tile.openstreetmap.org is fine for a prototype, not for public launch. Swap host before shipping.
+// Google Map Tiles 2D (same key, billed) with OpenStreetMap as fallback while the session is created or if it fails.
 const mm = $('minimap'), mctx = mm.getContext('2d'), tileCache = new Map();
-let mmZoom = 0; // user offset on top of the per-mode zoom level
+let mmZoom = 0, mapSession = null, mapSource = 'osm'; // user offset on top of the per-mode zoom level
 const mmView = {}; // what the last frame drew, for click-to-teleport
+fetch(`https://tile.googleapis.com/v1/createSession?key=${KEY}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mapType: 'roadmap', language: 'en-US', region: 'US' }) })
+  .then(r => r.json()).then(r => { if (r.session) { mapSession = r.session; mapSource = 'google'; tileCache.clear(); } else console.warn('2D map session failed, using OSM:', r.error?.message); }).catch(() => {});
 mm.addEventListener('wheel', e => { e.preventDefault(); mmZoom = clamp(mmZoom - Math.sign(e.deltaY), -4, 3); }, { passive: false });
 $('zin').addEventListener('click', () => { mmZoom = Math.min(3, mmZoom + 1); });
 $('zout').addEventListener('click', () => { mmZoom = Math.max(-4, mmZoom - 1); });
@@ -425,22 +538,26 @@ mm.addEventListener('click', e => {
   const lon = tx / mmView.n * 360 - 180, lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * ty / mmView.n))) * RAD2DEG;
   setOrigin(lat, lon);
 });
-function osmTile(z, x, y) {
-  const k = `${z}/${x}/${y}`;
-  if (!tileCache.has(k)) { const im = new Image(); im.src = `https://tile.openstreetmap.org/${k}.png`; tileCache.set(k, im); }
+function mapTile(z, x, y) {
+  const k = `${mapSource}/${z}/${x}/${y}`;
+  if (!tileCache.has(k)) {
+    const im = new Image();
+    im.src = mapSource === 'google' ? `https://tile.googleapis.com/v1/2dtiles/${z}/${x}/${y}?session=${mapSession}&key=${KEY}` : `https://tile.openstreetmap.org/${z}/${x}/${y}.png`;
+    tileCache.set(k, im);
+  }
   return tileCache.get(k);
 }
-function drawMinimap() {
+let urlTimer = 0;
+function drawMinimap(dt) {
   if (!tiles.root) return; // no tileset yet: group transform is identity
-  const p = mode === 'drive' ? car.position : mode === 'glide' ? glider.position : feet;
-  const heading = mode === 'drive' ? car.rotation.y : mode === 'glide' ? gYaw : yaw;
+  const p = anchor();
   const Z = clamp((mode === 'glide' ? 14 : mode === 'drive' ? 16 : 17) + mmZoom, 3, 19);
   const { lat, lon } = worldToLatLon(p);
   const n = 2 ** Z, latR = lat * DEG2RAD;
   const tx = (lon + 180) / 360 * n, ty = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * n;
   const W = mm.width, cx = W / 2, cy = W / 2, r = W / 2 - 6, S = 256;
   // bearing of the heading: from two world points, no axis assumptions
-  const ahead = worldToLatLon(p.clone().add(fwdOf(heading).multiplyScalar(10)));
+  const ahead = worldToLatLon(p.clone().add(fwdOf(heading()).multiplyScalar(10)));
   const bearing = Math.atan2((ahead.lon - lon) * Math.cos(latR), ahead.lat - lat);
   Object.assign(mmView, { tx, ty, n, bearing });
   mctx.clearRect(0, 0, W, W);
@@ -449,11 +566,15 @@ function drawMinimap() {
   mctx.fillStyle = '#223'; mctx.fillRect(0, 0, W, W);
   mctx.translate(cx, cy); mctx.rotate(-bearing); // heading up
   for (let dx = -2; dx <= 2; dx++) for (let dy = -2; dy <= 2; dy++) {
-    const im = osmTile(Z, Math.floor(tx) + dx, Math.floor(ty) + dy);
+    const im = mapTile(Z, Math.floor(tx) + dx, Math.floor(ty) + dy);
     if (im.complete && im.naturalWidth) mctx.drawImage(im, (Math.floor(tx) + dx - tx) * S, (Math.floor(ty) + dy - ty) * S, S, S);
   }
+  // other players and unvisited landmarks as dots (rotated with the map)
+  const dot = (la, lo, color, rad) => { const t2x = (lo + 180) / 360 * n, l2 = la * DEG2RAD, t2y = (1 - Math.log(Math.tan(l2) + 1 / Math.cos(l2)) / Math.PI) / 2 * n; mctx.fillStyle = color; mctx.beginPath(); mctx.arc((t2x - tx) * S, (t2y - ty) * S, rad, 0, Math.PI * 2); mctx.fill(); };
+  for (const [name, la, lo] of LANDMARKS) if (!visited.has(name)) dot(la, lo, '#ffcc00', 6);
+  for (const o of others.values()) { const ll = worldToLatLon(o.group.position); dot(ll.lat, ll.lon, '#34c759', 6); }
   // north marker on the rim
-  mctx.fillStyle = '#fff'; mctx.font = 'bold 12px monospace'; mctx.textAlign = 'center'; mctx.textBaseline = 'middle';
+  mctx.font = 'bold 12px monospace'; mctx.textAlign = 'center'; mctx.textBaseline = 'middle';
   mctx.fillStyle = 'rgba(0,0,0,.6)'; mctx.beginPath(); mctx.arc(0, -r + 12, 9, 0, Math.PI * 2); mctx.fill();
   mctx.fillStyle = '#ff3b30'; mctx.fillText('N', 0, -r + 12);
   mctx.restore();
@@ -463,14 +584,14 @@ function drawMinimap() {
   mctx.fillStyle = '#fff'; mctx.strokeStyle = '#000'; mctx.lineWidth = 2;
   mctx.beginPath(); mctx.moveTo(cx, cy - 11); mctx.lineTo(cx + 8, cy + 8); mctx.lineTo(cx, cy + 3); mctx.lineTo(cx - 8, cy + 8); mctx.closePath();
   mctx.fill(); mctx.stroke();
-  $('coords').textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)} · © OpenStreetMap`;
+  $('coords').textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)} · ${mapSource === 'google' ? 'Google' : '© OpenStreetMap'}`;
+  if ((urlTimer += dt) > 2 && !spawning) { urlTimer = 0; history.replaceState(null, '', `?at=${lat.toFixed(5)},${lon.toFixed(5)}`); } // share link follows you
 }
 
 // ---- boot ----
 const at = new URLSearchParams(location.search).get('at')?.split(',').map(Number);
 let pendingAt = at?.length === 2 && at.every(Number.isFinite) ? at : null; // applied once the root tileset exists (see loop)
 beginSpawn(pendingAt ? `${at[0]}, ${at[1]}` : 'Times Square');
-
 
 // ---- loop ----
 const hud = $('hud'), attribution = $('attribution');
@@ -483,11 +604,14 @@ renderer.setAnimationLoop(() => {
   if (keys.has('ArrowDown')) zoom = Math.min(6, zoom * Math.exp(2 * dt));
   if (mode === 'drive') stepDrive(dt); else if (mode === 'glide') stepGlide(dt); else stepWalk(dt);
   mixer?.update(dt);
+  updateOthers(dt);
+  sendState(dt);
+  updateQuests(dt);
   updateCamera();
   camera.updateMatrixWorld();
   tiles.update();
   renderer.render(scene, camera);
-  if ((mmTimer += dt) > 0.08) { mmTimer = 0; drawMinimap(); }
+  if ((mmTimer += dt) > 0.08) { drawMinimap(mmTimer); mmTimer = 0; }
   hud.textContent = mode === 'drive'
     ? `${Math.abs(carSpeed * 3.6).toFixed(0)} km/h\nWS gas/reverse · AD steer · Space brake · V exit`
     : mode === 'glide'
