@@ -12,8 +12,8 @@ import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
 // ---- config ----
 const ORIGIN = { lat: 40.758, lon: -73.9855 }; // Times Square. 1 unit = 1 m, Y up.
 const RADIUS = 0.45, WALK = 4, RUN = 9, JUMP = 6, GRAVITY = -20;
-const CAR = { accel: 12, brake: 25, maxSpeed: 40, drag: 0.6, turn: 1.6, length: 4.5, width: 1.9 };
-const GLIDER = { launch: 300, liftSpeed: 60, cruise: 22, min: 10, max: 70, sink: 1.5, turn: 1.1, pitchRate: 1.2, ceiling: 2500 };
+const CAR = { accel: 12, brake: 25, maxSpeed: 40, drag: 0.6, turn: 1.6, length: 4.5, width: 1.9, nitroAccel: 40, nitroMax: 80 };
+const GLIDER = { launch: 300, liftSpeed: 60, cruise: 22, min: 10, max: 70, nitroMax: 130, nitroAccel: 60, sink: 1.5, turn: 1.1, pitchRate: 1.2, ceiling: 2500 };
 const KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY;
 const MP_URL = import.meta.env.VITE_MP_URL; // wss://<worker>/room/nyc — multiplayer is off when unset
 const BASE = import.meta.env.BASE_URL;
@@ -186,7 +186,7 @@ const gltf = new GLTFLoader().setDRACOLoader(draco); // ferrari.glb is Draco-com
 const load = url => new Promise((res, rej) => gltf.load(BASE + url, res, undefined, rej));
 let mixer, actions = {}, current, carModel = null, avatar = null, clips = [];
 const person = new THREE.Group(); scene.add(person);
-const glider = makeGlider(); glider.visible = false; scene.add(glider);
+const glider = makeGlider(); glider.visible = false; scene.add(glider); glider.add(...gliderFlames);
 
 Promise.all([load('guy.glb'), load('Soldier.glb')]).then(([m, s]) => {
   const target = skinned(m.scene);
@@ -265,17 +265,31 @@ function makeGlider() {
   bar.position.set(0, -0.7, 0); g.add(bar);
   return g;
 }
+// nitro exhaust: an orange cone pointing backwards (+Z), scaled and flickered while boosting
+function makeFlame(x, y, z) {
+  const core = new THREE.Mesh(new THREE.ConeGeometry(0.16, 1.6, 12), new THREE.MeshBasicMaterial({ color: 0xffb020, transparent: true, opacity: 0.9, depthWrite: false }));
+  const glow = new THREE.Mesh(new THREE.ConeGeometry(0.3, 2.4, 12), new THREE.MeshBasicMaterial({ color: 0xff4500, transparent: true, opacity: 0.35, depthWrite: false }));
+  core.position.y = glow.position.y = 1; // base at the exhaust, apex trailing
+  const g = new THREE.Group(); g.add(core, glow);
+  g.position.set(x, y, z); g.rotation.x = Math.PI / 2; g.visible = false;
+  return g;
+}
+function flicker(flames, on, dt) {
+  for (const f of flames) { f.visible = on; if (on) f.scale.set(1, 0.7 + Math.random() * 0.7, 1); }
+}
+let carFlames = [];
+const gliderFlames = [makeFlame(-1.2, -0.25, 1.6), makeFlame(1.2, -0.25, 1.6)];
 
 // ---- state ----
 const feet = new THREE.Vector3(0, 300, 0);
 let vy = 0, grounded = false, yaw = 0, speed = 0, mode = 'walk';
 let car = null, carSpeed = 0, wheels = [];
-let gYaw = 0, gPitch = 0, gSpeed = 0, gBank = 0, lift = 0; // lift = metres still to rise straight up after launch
+let gYaw = 0, gPitch = 0, gSpeed = 0, gBank = 0, lift = 0, boost = false; // lift kept at 0: launch is instant
 const anchor = () => mode === 'drive' ? car.position : mode === 'glide' ? glider.position : feet;
 const heading = () => mode === 'drive' ? car.rotation.y : mode === 'glide' ? gYaw : yaw;
 
 function setMode(m) {
-  mode = m;
+  mode = m; boost = false;
   person.visible = m === 'walk';
   glider.visible = m === 'glide';
   orbit = 0;
@@ -286,6 +300,7 @@ function toggleCar() {
     if (car) scene.remove(car);
     car = new THREE.Group();
     car.add(carModel.clone());
+    carFlames = [makeFlame(-0.45, 0.45, 2.25), makeFlame(0.45, 0.45, 2.25)]; car.add(...carFlames);
     wheels = ['wheel_fl', 'wheel_fr', 'wheel_rl', 'wheel_rr'].map(n => car.getObjectByName(n));
     car.position.copy(feet).addScaledVector(fwdOf(yaw), 3);
     car.rotation.y = yaw; carSpeed = 0;
@@ -300,7 +315,7 @@ function toggleCar() {
 function toggleGlider() {
   if (mode === 'drive' || spawning) return;
   if (mode === 'walk') {
-    glider.position.copy(feet); glider.position.y += 2; lift = GLIDER.launch; // rise from where you stand
+    glider.position.copy(feet); glider.position.y += GLIDER.launch; lift = 0; // straight to altitude, where you stand
     gYaw = camYaw; gPitch = 0; gSpeed = GLIDER.cruise; gBank = 0;
     setMode('glide');
   } else land();
@@ -376,9 +391,10 @@ function stepWalk(dt) {
 function stepDrive(dt) {
   const throttle = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0);
   const steer = (keys.has('KeyA') ? 1 : 0) - (keys.has('KeyD') ? 1 : 0);
-  carSpeed += throttle * (throttle * carSpeed < 0 ? CAR.brake : CAR.accel) * dt;
+  boost = keys.has('ShiftLeft') && throttle > 0;
+  carSpeed += throttle * (throttle * carSpeed < 0 ? CAR.brake : boost ? CAR.nitroAccel : CAR.accel) * dt;
   carSpeed -= carSpeed * CAR.drag * dt;
-  carSpeed = clamp(carSpeed, -CAR.maxSpeed / 3, CAR.maxSpeed);
+  carSpeed = clamp(carSpeed, -CAR.maxSpeed / 3, boost ? CAR.nitroMax : Math.max(CAR.maxSpeed, carSpeed - CAR.drag * 60 * dt)); // released nitro bleeds off, no hard snap
   if (keys.has('Space')) carSpeed -= Math.sign(carSpeed) * Math.min(Math.abs(carSpeed), CAR.brake * 2 * dt);
   car.rotation.y += steer * CAR.turn * (carSpeed / CAR.maxSpeed) * dt * 3;
   const move = fwdOf(car.rotation.y).multiplyScalar(carSpeed * dt);
@@ -388,6 +404,7 @@ function stepDrive(dt) {
   const ground = groundUnder(car.position);
   if (ground) car.position.y += (ground.point.y - car.position.y) * Math.min(1, 10 * dt);
   for (const w of wheels) if (w) w.rotation.x -= carSpeed * dt / 0.36;
+  flicker(carFlames, boost, dt);
   camYaw = car.rotation.y + orbit; // orbit = free mouse look, follows the car as it turns
 }
 
@@ -406,8 +423,10 @@ function stepGlide(dt) {
   gYaw += steer * GLIDER.turn * dt;
   // gravity along the nose, drag toward cruise speed
   gSpeed += (-9.8 * Math.sin(gPitch) - 0.4 * (gSpeed - GLIDER.cruise)) * dt;
-  if (keys.has('ShiftLeft')) gSpeed += 30 * dt; // sprint: push toward max speed
-  gSpeed = clamp(gSpeed, GLIDER.min, GLIDER.max);
+  boost = keys.has('ShiftLeft');
+  if (boost) gSpeed += GLIDER.nitroAccel * dt;
+  gSpeed = clamp(gSpeed, GLIDER.min, boost ? GLIDER.nitroMax : Math.max(GLIDER.max, gSpeed - 40 * dt)); // released nitro bleeds off
+  flicker(gliderFlames, boost, dt);
   const dir = new THREE.Vector3(-Math.sin(gYaw) * Math.cos(gPitch), Math.sin(gPitch), -Math.cos(gYaw) * Math.cos(gPitch));
   const move = dir.clone().multiplyScalar(gSpeed * dt); move.y -= GLIDER.sink * dt;
   const hit = cast(glider.position, tmp2.copy(move).normalize(), move.length() + 3);
@@ -434,6 +453,8 @@ function updateCamera() {
   if (hit) off.setLength(Math.max(0.5, hit.distance - 0.3));
   camera.position.copy(focus).add(off);
   camera.lookAt(focus);
+  const fov = boost && mode !== 'walk' ? 88 : 70; // nitro widens the lens
+  if (Math.abs(camera.fov - fov) > 0.1) { camera.fov = lerp(camera.fov, fov, 0.1); camera.updateProjectionMatrix(); }
 }
 
 // ---- landmarks: visit all ten, timer runs from your first step ----
@@ -613,9 +634,9 @@ renderer.setAnimationLoop(() => {
   renderer.render(scene, camera);
   if ((mmTimer += dt) > 0.08) { drawMinimap(mmTimer); mmTimer = 0; }
   hud.textContent = mode === 'drive'
-    ? `${Math.abs(carSpeed * 3.6).toFixed(0)} km/h\nWS gas/reverse · AD steer · Space brake · V exit`
+    ? `${boost ? 'NITRO · ' : ''}${Math.abs(carSpeed * 3.6).toFixed(0)} km/h\nWS gas/reverse · AD steer · Space brake · Shift nitro · V exit`
     : mode === 'glide'
-      ? lift > 0 ? `rising… ${(GLIDER.launch - lift).toFixed(0)} m` : `${(gSpeed * 3.6).toFixed(0)} km/h · ${glider.position.y.toFixed(0)} m\nW dive · S climb · AD turn · Shift sprint · H land`
+      ? `${boost ? 'NITRO · ' : ''}${(gSpeed * 3.6).toFixed(0)} km/h · ${glider.position.y.toFixed(0)} m\nW dive · S climb · AD turn · Shift nitro · H land`
       : `${grounded ? '' : 'air · '}WASD move · Shift run · Space jump · V car · H glider · ↑↓ zoom · click to look`;
   attribution.textContent = tiles.getAttributions().map(a => a.value).join(' · '); // Google requires this line, verbatim, along the bottom
 });
